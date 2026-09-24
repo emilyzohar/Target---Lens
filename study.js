@@ -1,7 +1,10 @@
 /* jsPsych recording study. Qualtrics supplies rid and optionally task_order / first_A,B,C. */
 const EXPERIMENT_ID = 'ZA4MQr5H87Iy';
+const BUILD_ID = 'drive-ZA4MQr5H87Iy-face-restart-checks-yesno-20260924';
 const TRIAL_MS = 10000;
 const params = new URLSearchParams(location.search);
+console.info(`Lens study ${BUILD_ID}; DataPipe experiment ${EXPERIMENT_ID}`);
+if(params.get('debug')==='1'){const badge=document.createElement('div');badge.className='debug-badge';badge.textContent=`Build ${BUILD_ID} · DataPipe ${EXPERIMENT_ID}`;document.body.append(badge)}
 const qualtrics_id = params.get('rid');
 const subject_id = crypto.randomUUID();
 // Provide a Qualtrics continuation or follow-up survey URL in this constant, or pass ?return_url=... from Qualtrics.
@@ -58,25 +61,38 @@ async function setupFaceMonitor(stream){
   const vision=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
   detector=await FaceDetector.createFromOptions(vision,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'},runningMode:'VIDEO',minDetectionConfidence:0.5});
  }catch(error){video.remove();console.warn('Face monitor unavailable:',error);return null}
- let active=false,misses=0,alertCount=0,sampleCount=0,busy=false;
+ let active=false,misses=0,alertCount=0,sampleCount=0,busy=false,lastCount=null,listener=null,failed=false;
+ const warningFor=count=>count>1?'More than one face is in frame. Return alone; this attempt will restart.':'Your face is out of frame. Return to the camera; this attempt will restart.';
+ function updatePause(paused){
+  if(!active)return;
+  if(paused&&!warning.textContent)alertCount++;
+  warning.textContent=paused?warningFor(lastCount):'';warning.hidden=!paused;
+  listener?.(paused);
+ }
  const timer=setInterval(()=>{
   if(busy||video.readyState<2)return;
   busy=true;
   try{
    const faces=detector.detectForVideo(video,performance.now()).detections||[];
+   lastCount=faces.length;
    if(active){
     sampleCount++;
     misses=faces.length===0?misses+1:0;
-    const message=faces.length>1?'More than one face is in frame. Please sit alone.':misses>=2?'Your face is not visible. Please return to the frame.':'';
-    if(message&&!warning.textContent)alertCount++;
-    warning.textContent=message;warning.hidden=!message;
+    if(faces.length>1||misses>=2)updatePause(true);
+    else if(faces.length===1)updatePause(false);
    }
-  }catch(error){console.warn('Face monitoring stopped:',error);clearInterval(timer);warning.hidden=true;warning.textContent=''}
-  finally{busy=false}
- },1200);
+  }catch(error){
+   console.warn('Face monitoring stopped:',error);failed=true;clearInterval(timer);
+   warning.textContent='Camera check stopped working. The study cannot continue; contact the researcher.';warning.hidden=false;
+   listener?.(true);
+  }finally{busy=false}
+ },500);
  return {
-  begin(){active=true;misses=0;alertCount=0;sampleCount=0;warning.hidden=true;warning.textContent=''},
-  end(){active=false;warning.hidden=true;warning.textContent='';return {face_alert_count:alertCount,face_samples:sampleCount,face_monitor_status:'active'}},
+  get valid(){return !failed&&lastCount===1},
+  get failed(){return failed},
+  async waitForFace(){while(!this.valid){if(failed)throw Error('Face detection stopped working. Please contact the researcher.');await sleep(250)}},
+  begin(onPause){active=true;misses=0;alertCount=0;sampleCount=0;listener=onPause;updatePause(!this.valid)},
+  end(){active=false;listener=null;warning.hidden=true;warning.textContent='';return {face_alert_count:alertCount,face_samples:sampleCount,face_monitor_status:failed?'failed':'active'}},
   stop(){clearInterval(timer);detector.close();video.remove();warning.hidden=true;warning.textContent=''}
  };
 }
@@ -97,7 +113,7 @@ function startRecording(){
  const mime=supportedMime();if(!mime)throw Error('This browser cannot record video. Use current Chrome or Edge.');
  const chunks=[];const recorder=new MediaRecorder(camera,{mimeType:mime,videoBitsPerSecond:550000});
  const finished=new Promise((resolve,reject)=>{recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};recorder.onerror=e=>reject(e.error||Error('Recording failed'));recorder.onstop=()=>resolve(new Blob(chunks,{type:mime.split(';')[0]}))});
- recorder.start();return {stop:()=>{if(recorder.state==='recording')recorder.stop();return finished}};
+ recorder.start();return {pause:()=>{if(recorder.state==='recording')recorder.pause()},resume:()=>{if(recorder.state==='paused')recorder.resume()},stop:()=>{if(recorder.state!=='inactive')recorder.stop();return finished}};
 }
 function asBase64(blob){return new Promise((resolve,reject)=>{const r=new FileReader();r.onerror=()=>reject(r.error);r.onload=()=>resolve(String(r.result).split(',')[1]);r.readAsDataURL(blob)})}
 async function sendVideo(blob,filename,status){
@@ -136,28 +152,37 @@ function trialFeedback(stimulus,result){
    ? {success:true,title:'Correct',detail:`You solved the anagram.`}
    : {success:false,title:'Not solved',detail:`One answer was ${stimulus.word}.`};
 }
-async function runActivity(area,t,stimulus){
- const started=performance.now(),responses=[];let clicks=0,cleanup=()=>{},answer='',firstKeyMs=null,lastKeyMs=null;
+function createActiveClock(){
+ let accumulated=0,pausedTotal=0,pauseStarted=0,started=performance.now(),paused=false;
+ return {
+  elapsed(){return accumulated+(paused?0:performance.now()-started)},
+  get paused(){return paused},
+  pausedMs(){return Math.round(pausedTotal+(paused?performance.now()-pauseStarted:0))},
+  setPaused(value){if(value===paused)return;if(value){accumulated+=performance.now()-started;pauseStarted=performance.now();paused=true}else{pausedTotal+=performance.now()-pauseStarted;started=performance.now();paused=false}}
+ };
+}
+async function runActivity(area,t,stimulus,clock=createActiveClock(),interrupted=()=>false){
+ const responses=[];let clicks=0,cleanup=()=>{},answer='',firstKeyMs=null,lastKeyMs=null;
  const timer=document.createElement('div');timer.className='timer';area.append(timer);
  const feedback=document.createElement('div');feedback.className='task-feedback';feedback.setAttribute('aria-live','polite');
- const drawTimer=()=>{timer.textContent=`${Math.max(0,Math.ceil((TRIAL_MS-(performance.now()-started))/1000))} seconds remaining`};
- drawTimer();const timerId=setInterval(drawTimer,100);
+ const drawTimer=()=>{timer.textContent=clock.paused?"Paused — return to camera frame":`${Math.max(0,Math.ceil((TRIAL_MS-clock.elapsed())/1000))} seconds remaining`};
+ drawTimer();
  if(stimulus.kind==='press'){
   area.insertAdjacentHTML('beforeend',`<p>Press the button <strong>${stimulus.target} times</strong> within 10 seconds.</p><div class="press-progress"><div id="press-fill"></div></div><div class="press-count" id="press-count">0 / ${stimulus.target}</div>`);
   const b=button('PRESS',()=>{
-   if(clicks>=stimulus.target)return;
+   if(clock.paused||clicks>=stimulus.target)return;
    clicks++;area.querySelector('#press-count').textContent=`${clicks} / ${stimulus.target}`;
    area.querySelector('#press-fill').style.width=`${100*clicks/stimulus.target}%`;
-   responses.push({time_ms:Math.round(performance.now()-started),press:clicks});
+   responses.push({time_ms:Math.round(clock.elapsed()),press:clicks});
    b.classList.remove('tap');void b.offsetWidth;b.classList.add('tap');
    if(clicks===stimulus.target){b.remove();feedback.textContent='Target reached! Wait for the timer to finish.'}
   },'press-button');area.append(b,feedback);cleanup=()=>b.remove();
  }else if(stimulus.kind==='anagram'){
   area.insertAdjacentHTML('beforeend',`<p>Unscramble the letters into an English word.</p><div class="stimulus">${stimulus.scramble}</div><label for="answer">Your answer</label><input id="answer" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12"><p class="hint">Submit a guess. You may try again until the timer ends.</p>`);
   const input=area.querySelector('#answer');const submit=button('Submit guess',()=>{
-   const guess=input.value.trim().toUpperCase();if(!guess||submit.disabled)return;
+   const guess=input.value.trim().toUpperCase();if(clock.paused||!guess||submit.disabled)return;
    const correct=[stimulus.word,...(ALTERNATE_SOLUTIONS[stimulus.word]||[])].includes(guess);
-   responses.push({answer:guess,correct,time_ms:Math.round(performance.now()-started)});
+   responses.push({answer:guess,correct,time_ms:Math.round(clock.elapsed())});
    feedback.className=`task-feedback ${correct?'good':'bad'}`;feedback.textContent=correct?'Correct!':'Not quite — try again.';
    input.value='';if(correct){input.disabled=true;submit.remove()}else input.focus();
   },'secondary');area.append(submit,feedback);
@@ -166,13 +191,20 @@ async function runActivity(area,t,stimulus){
  }else{
   area.insertAdjacentHTML('beforeend',`<p>Add <strong>${stimulus.n}</strong> to each digit. If the sum is 10 or more, keep only its last digit.</p><div class="digit-sequence" id="digit-sequence" aria-live="polite"></div><div class="answer-panel" id="answer-panel" hidden><label for="answer">Enter all four resulting digits, in order</label><input id="answer" type="text" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" aria-label="Four-digit answer"><p class="hint">You have until the timer reaches zero.</p></div>`);
   const sequence=area.querySelector('#digit-sequence'),panel=area.querySelector('#answer-panel'),input=area.querySelector('#answer');
-  sequence.textContent='Get ready';const scheduled=[];
-  for(let i=0;i<4;i++)scheduled.push(setTimeout(()=>{sequence.innerHTML=`<span class="digit">${stimulus.digits[i]}</span><span class="digit-position">Digit ${i+1} of 4</span>`},(i+1)*1000));
-  scheduled.push(setTimeout(()=>{sequence.hidden=true;panel.hidden=false;input.focus()},5000));
-  const onInput=()=>{input.value=input.value.replace(/\D/g,'').slice(0,4);if(input.value){const elapsed=Math.round(performance.now()-started);firstKeyMs??=elapsed;lastKeyMs=elapsed}};input.addEventListener('input',onInput);
-  cleanup=()=>{scheduled.forEach(clearTimeout);answer=input.value.trim();input.removeEventListener('input',onInput);input.disabled=true};
+  sequence.textContent='Get ready';
+  let stage=-1;
+  const renderDigits=()=>{
+   const elapsed=clock.elapsed();const next=elapsed<1000?-1:elapsed<5000?Math.floor(elapsed/1000)-1:4;
+   if(next===stage)return;stage=next;
+   if(stage>=0&&stage<4)sequence.innerHTML=`<span class="digit">${stimulus.digits[stage]}</span><span class="digit-position">Digit ${stage+1} of 4</span>`;
+   if(stage===4){sequence.hidden=true;panel.hidden=false;input.focus()}
+  };
+  const onInput=()=>{if(clock.paused)return;input.value=input.value.replace(/\D/g,'').slice(0,4);if(input.value){const elapsed=Math.round(clock.elapsed());firstKeyMs??=elapsed;lastKeyMs=elapsed}};input.addEventListener('input',onInput);
+  cleanup=()=>{answer=input.value.trim();input.removeEventListener('input',onInput);input.disabled=true};
  }
- await sleep(TRIAL_MS);clearInterval(timerId);cleanup();
+ while(clock.elapsed()<TRIAL_MS&&!interrupted()){if(faceMonitor?.failed)throw Error('Face detection stopped working during the trial.');drawTimer();if(stimulus.kind==='add')renderDigits();area.inert=clock.paused;await sleep(50)}
+ area.inert=false;cleanup();
+ if(interrupted())return {interrupted:true};
  const expected=stimulus.kind==='add'?addDigits(stimulus.digits,stimulus.n):null;
  const status=stimulus.kind==='add'?(answer===''?'blank':answer===expected?'correct':'incorrect'):null;
  if(stimulus.kind==='add')responses.push({answer,expected,status,first_key_ms:firstKeyMs,last_key_ms:lastKeyMs});
@@ -237,8 +269,10 @@ class RecordingTrial{
     if(!supportedMime())throw Error('This browser cannot record video. Use current Chrome or Edge.');
     const monitorStatus=document.createElement('p');monitorStatus.className='hint';monitorStatus.textContent='Checking live face alerts…';area.append(monitorStatus);
     faceMonitor=await setupFaceMonitor(camera);
-    monitorStatus.textContent=faceMonitor?'Face alerts are active; an alert will appear if your face is not detected during a recorded trial.':'Automatic face alerts are unavailable on this device. Please keep your face visible throughout the recorded trials.';
-    const preview=document.createElement('video');preview.className='video-preview';preview.autoplay=true;preview.muted=true;preview.playsInline=true;preview.srcObject=camera;area.append(preview);await preview.play();
+    if(!faceMonitor)throw Error('Automatic face detection could not load. Recording cannot start; please contact the researcher.');
+    monitorStatus.textContent='Face monitoring is active. If your face leaves the frame during a task, that attempt will restart after your face returns.';
+    const previewFrame=document.createElement('div');previewFrame.className='preview-frame';const preview=document.createElement('video');preview.className='video-preview';preview.autoplay=true;preview.muted=true;preview.playsInline=true;preview.srcObject=camera;const oval=document.createElement('div');oval.className='face-oval';oval.setAttribute('aria-hidden','true');previewFrame.append(preview,oval);area.append(previewFrame);await preview.play();
+    const ovalNote=document.createElement('p');ovalNote.className='hint';ovalNote.textContent='Center your face inside the oval. Keep your head and shoulders visible in the preview.';area.append(ovalNote);
     const settings=camera.getVideoTracks()[0].getSettings();if(settings.width<320||settings.height<240)throw Error('Camera resolution is too low. Choose another camera.');
     const checks=['My face is centered and clearly visible.','My head and shoulders are visible.','The lighting makes my face easy to see.','I am the only person in the frame.','I will keep these conditions for all 24 recorded trials.'];
     const list=document.createElement('div');list.className='checklist';area.append(list);
@@ -246,17 +280,47 @@ class RecordingTrial{
     const status=document.createElement('p');status.className='status';area.append(status);
     const start=button('Record 5-second neutral baseline',()=>go());start.disabled=true;area.append(start);
     list.addEventListener('change',()=>{start.disabled=[...list.querySelectorAll('input')].some(x=>!x.checked)});
-    let go;await new Promise(resolve=>go=resolve);start.disabled=true;status.textContent='Look at the camera with a neutral expression. Recording…';
-    const rec=startRecording();await sleep(5000);const blob=await rec.stop();preview.remove();
+    let go;await new Promise(resolve=>go=resolve);start.disabled=true;
+    status.textContent='Waiting for exactly one face in the camera preview…';await faceMonitor.waitForFace();
+    status.textContent='Look at the camera with a neutral expression. Recording…';
+    const rec=startRecording(),clock=createActiveClock();
+    faceMonitor.begin(paused=>{clock.setPaused(paused);if(paused)rec.pause();else rec.resume()});
+    let blob,baselineFaceStats;
+    try{
+     while(clock.elapsed()<5000){
+      if(faceMonitor.failed)throw Error('Face detection stopped working during the baseline.');
+      status.textContent=clock.paused?'Baseline paused — return to the camera frame.':`Neutral baseline: ${Math.max(0,Math.ceil((5000-clock.elapsed())/1000))} seconds remaining`;
+      await sleep(50);
+     }
+    }finally{baselineFaceStats=faceMonitor.end();blob=await rec.stop()}
+    previewFrame.remove();
     const filename=`${subject_id}_baseline.${blob.type==='video/mp4'?'mp4':'webm'}`;const upload_status=await sendVideo(blob,filename,status);
-    return {phase:'baseline',trial_key:`${subject_id}_baseline`,video_filename:filename,upload_status,quality_confirmation:'five_checks_confirmed',camera_width:settings.width,camera_height:settings.height,face_monitor_status:faceMonitor?'active':'unavailable'};
+    return {phase:'baseline',trial_key:`${subject_id}_baseline`,video_filename:filename,upload_status,quality_confirmation:'five_checks_confirmed',camera_width:settings.width,camera_height:settings.height,...baselineFaceStats,face_pause_ms:clock.pausedMs()};
    }
    const stimulus=prepareTask(t);
    display.innerHTML=wrap(TASK_NAMES[t.task],`Trial ${t.trial} of 24`);let area=display.querySelector('#content');
    area.innerHTML=`<p class="framing">Keep your face centered, your head and shoulders visible, and the lighting clear. Stay alone in the frame.</p><p>On this trial: <strong>${stimulus.kind==='add'?`add ${stimulus.n} to each number`:stimulus.kind==='press'?`press the button ${stimulus.target} times in 10 seconds`:`solve a ${stimulus.word.length}-letter anagram`}</strong>.</p>`;
    const ready=button('Start 10-second trial',()=>resolveReady());area.append(ready);let resolveReady;await new Promise(resolve=>resolveReady=resolve);
-   area.innerHTML='';const rec=startRecording();faceMonitor?.begin();let result,blob,faceStats;
-   try{result=await runActivity(area,t,stimulus)}finally{faceStats=faceMonitor?.end()||{face_alert_count:null,face_samples:null,face_monitor_status:'unavailable'};blob=await rec.stop()}
+   ready.disabled=true;
+   const gate=document.createElement('p');gate.className='status';area.append(gate);
+   gate.textContent='Checking that one face is visible before recording…';
+   await faceMonitor.waitForFace();
+   let result,blob,faceStats,clock,restartCount=0,interruptedActiveMs=0;
+   for(;;){
+    area.replaceChildren();
+    const rec=startRecording();clock=createActiveClock();let interrupted=false;
+    faceMonitor.begin(paused=>{clock.setPaused(paused);if(paused){interrupted=true;rec.pause()}else rec.resume()});
+    try{result=await runActivity(area,t,stimulus,clock,()=>interrupted)}finally{faceStats=faceMonitor.end();blob=await rec.stop()}
+    if(!interrupted)break;
+    restartCount++;interruptedActiveMs+=Math.round(clock.elapsed());
+    // Interrupted clips remain local and are never uploaded or scored.
+    blob=null;
+    area.innerHTML='<p class="framing">Your face was not clearly in frame. This trial will restart from the beginning when exactly one face is visible.</p>';
+    const retryStatus=document.createElement('p');retryStatus.className='status';retryStatus.textContent='Waiting for your face to return…';area.append(retryStatus);
+    await faceMonitor.waitForFace();
+    retryStatus.textContent='Face detected. Restarting the full 10-second trial…';
+   }
+
    const summary=trialFeedback(stimulus,result);
    display.innerHTML=wrap(summary.title,`Trial ${t.trial} of 24`);area=display.querySelector('#content');area.className=`feedback-screen ${summary.success?'success':'needs-work'}`;
    const detail=document.createElement('p');detail.className='feedback-detail';detail.textContent=summary.detail;
@@ -270,7 +334,7 @@ class RecordingTrial{
    return {
     phase:'task',trial_key,task:t.task,task_name:TASK_NAMES[t.task],condition:t.condition,trial_number:t.trial,
     within_condition:t.within_condition,first_condition:t.first_condition,task_order:t.task_order,
-    video_filename:filename,upload_status,effort,trial_duration_ms:TRIAL_MS,...faceStats,
+    video_filename:filename,upload_status,effort,trial_duration_ms:TRIAL_MS,...faceStats,face_pause_ms:clock.pausedMs(),face_restart_count:restartCount,interrupted_active_ms:interruptedActiveMs,
     add_n:stimulus.kind==='add'?stimulus.n:null,
     add_digits:stimulus.kind==='add'?stimulus.digits:null,
     add_expected:stimulus.kind==='add'?addDigits(stimulus.digits,stimulus.n):null,
@@ -293,12 +357,28 @@ class RecordingTrial{
   }catch(error){stopCamera();display.innerHTML=wrap('Study paused');display.querySelector('#content').textContent=`${error.message} Please contact the researcher using the details in the consent form.`;throw error}
  }
 }
+class SurveyQuestion{
+ static info={name:'study-question',version:'0.1.0',parameters:{},data:{}};
+ constructor(jsPsych){this.jsPsych=jsPsych}
+ async trial(display,t){
+  const attention=t.question_kind==='attention';
+  const question=attention?'To show that you are reading this question, please select “Somewhat agree” below.':'During the tasks, did you answer thoughtfully and try to follow the instructions?';
+  const options=attention?['Strongly disagree','Somewhat disagree','Neither agree nor disagree','Somewhat agree','Strongly agree']:['Yes','No'];
+  display.innerHTML=wrap(attention?'A quick check':'One final question',attention?'Halfway through':'After the tasks');const area=display.querySelector('#content');
+  const prompt=document.createElement('p');prompt.textContent=question;area.append(prompt);
+  const form=document.createElement('form');form.className='survey-options';area.append(form);
+  options.forEach((option,i)=>{const label=document.createElement('label');const radio=document.createElement('input');radio.type='radio';radio.name='study-answer';radio.value=option;radio.required=true;if(i===0)radio.autofocus=true;label.append(radio,document.createTextNode(' '+option));form.append(label)});
+  const submit=button('Continue',()=>{},'primary');submit.type='submit';form.append(submit);
+  const response=await new Promise(resolve=>form.addEventListener('submit',e=>{e.preventDefault();resolve(form.elements['study-answer'].value)},{once:true}));
+  return {phase:attention?'attention_check':'honesty_question',question,response,attention_pass:attention?Number(response==='Somewhat agree'):null};
+ }
+}
 async function main(){
  try{
   if(!qualtrics_id||!/^[A-Za-z0-9_-]{1,100}$/.test(qualtrics_id))throw Error('Missing Qualtrics ResponseID: use ?rid=...');
   const trials=orderFromQualtrics();
   const practices=PRACTICE.map((p,i)=>({type:PracticeTrial,...p,practice_number:i%3+1}));
-  await jsPsych.run([...practices,{type:RecordingTrial,baseline:true},...trials.map(t=>({type:RecordingTrial,...t}))]);
+  await jsPsych.run([...practices,{type:RecordingTrial,baseline:true},...trials.slice(0,12).map(t=>({type:RecordingTrial,...t})),{type:SurveyQuestion,question_kind:'attention'},...trials.slice(12).map(t=>({type:RecordingTrial,...t})),{type:SurveyQuestion,question_kind:'honesty'}]);
  }catch(e){stopCamera();console.error(e);if(!document.querySelector('.card'))document.body.innerHTML='<main class="card"><h1>Study could not start</h1><p>Check the study link or contact the researcher.</p></main>'}
 }
 main();
