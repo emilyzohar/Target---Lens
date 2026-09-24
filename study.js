@@ -1,5 +1,5 @@
 /* jsPsych recording study. Qualtrics supplies rid and optionally task_order / first_A,B,C. */
-const EXPERIMENT_ID = 'ZWaZjR15uPrl';
+const EXPERIMENT_ID = 'ZA4MQr5H87Iy';
 const TRIAL_MS = 10000;
 const params = new URLSearchParams(location.search);
 const qualtrics_id = params.get('rid');
