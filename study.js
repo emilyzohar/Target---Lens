@@ -162,7 +162,7 @@ function createActiveClock(){
  };
 }
 async function runActivity(area,t,stimulus,clock=createActiveClock(),interrupted=()=>false){
- const responses=[];let clicks=0,cleanup=()=>{},answer='',firstKeyMs=null,lastKeyMs=null;
+ const responses=[];let clicks=0,cleanup=()=>{},renderDigits=()=>{},answer='',firstKeyMs=null,lastKeyMs=null;
  const timer=document.createElement('div');timer.className='timer';area.append(timer);
  const feedback=document.createElement('div');feedback.className='task-feedback';feedback.setAttribute('aria-live','polite');
  const drawTimer=()=>{timer.textContent=clock.paused?"Paused — return to camera frame":`${Math.max(0,Math.ceil((TRIAL_MS-clock.elapsed())/1000))} seconds remaining`};
@@ -193,7 +193,7 @@ async function runActivity(area,t,stimulus,clock=createActiveClock(),interrupted
   const sequence=area.querySelector('#digit-sequence'),panel=area.querySelector('#answer-panel'),input=area.querySelector('#answer');
   sequence.textContent='Get ready';
   let stage=-1;
-  const renderDigits=()=>{
+  renderDigits=()=>{
    const elapsed=clock.elapsed();const next=elapsed<1000?-1:elapsed<5000?Math.floor(elapsed/1000)-1:4;
    if(next===stage)return;stage=next;
    if(stage>=0&&stage<4)sequence.innerHTML=`<span class="digit">${stimulus.digits[stage]}</span><span class="digit-position">Digit ${stage+1} of 4</span>`;
