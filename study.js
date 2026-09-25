@@ -1,12 +1,12 @@
 /* jsPsych recording study. Qualtrics supplies rid and optionally task_order / first_A,B,C. */
 const EXPERIMENT_ID = 'ZA4MQr5H87Iy';
-const BUILD_ID = 'drive-ZA4MQr5H87Iy-grouped-trial-measures-20260925';
+const BUILD_ID = 'drive-ZA4MQr5H87Iy-rid-all-files-20260925';
 const TRIAL_MS = 10000;
 const params = new URLSearchParams(location.search);
 console.info(`Lens study ${BUILD_ID}; DataPipe experiment ${EXPERIMENT_ID}`);
 if(params.get('debug')==='1'){const badge=document.createElement('div');badge.className='debug-badge';badge.textContent=`Build ${BUILD_ID} · DataPipe ${EXPERIMENT_ID}`;document.body.append(badge)}
 const qualtrics_id = params.get('rid');
-const subject_id = crypto.randomUUID();
+const subject_id = qualtrics_id;
 // Provide a Qualtrics continuation or follow-up survey URL in this constant, or pass ?return_url=... from Qualtrics.
 const QUALTRICS_RETURN_URL = 'https://utorontopsych.az1.qualtrics.com/jfe/form/SV_aaUYdNgmdgq4ACy';
 function buildReturnUrl(){
@@ -15,13 +15,14 @@ function buildReturnUrl(){
  try{
   const url=new URL(raw);
   if(url.protocol!=='https:'||!(url.hostname==='qualtrics.com'||url.hostname.endsWith('.qualtrics.com')))return null;
+  url.searchParams.set('id',qualtrics_id);
   url.searchParams.set('rid',qualtrics_id);
   url.searchParams.set('study_id',subject_id);
   return url.href;
  }catch{return null}
 }
 const jsPsych = initJsPsych({
-  extensions:[{type:jsPsychExtensionPipe,params:{experiment_id:EXPERIMENT_ID,filename:()=>`${subject_id}.csv`,stream:true}}],
+  extensions:[{type:jsPsychExtensionPipe,params:{experiment_id:EXPERIMENT_ID,filename:()=>`${qualtrics_id}.csv`,stream:true}}],
   on_finish:()=>{
    stopCamera();
    const content=document.querySelector('#jspsych-content');
