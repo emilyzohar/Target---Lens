@@ -1,6 +1,6 @@
 /* jsPsych recording study. Qualtrics supplies rid and optionally task_order / first_A,B,C. */
 const EXPERIMENT_ID = 'ZA4MQr5H87Iy';
-const BUILD_ID = 'drive-ZA4MQr5H87Iy-face-restart-checks-yesno-20260924';
+const BUILD_ID = 'drive-ZA4MQr5H87Iy-grouped-trial-measures-20260925';
 const TRIAL_MS = 10000;
 const params = new URLSearchParams(location.search);
 console.info(`Lens study ${BUILD_ID}; DataPipe experiment ${EXPERIMENT_ID}`);
@@ -131,9 +131,52 @@ async function sendVideo(blob,filename,status){
   const retry=button('Retry upload',()=>wake(),'secondary');status.after(retry);let wake;await new Promise(resolve=>wake=resolve);retry.remove();
  }
 }
-function rating(display){return new Promise(resolve=>{
- display.innerHTML=wrap('How much effort did you exert?','Trial complete');const area=display.querySelector('#content');area.innerHTML='<p>Rate the effort you actually exerted in that trial.</p><div class="scale"><span>None at all</span><div id="scale-buttons"></div><span>A great deal</span></div>';
- for(let i=1;i<=7;i++)area.querySelector('#scale-buttons').append(button(String(i),()=>resolve(i),'scale-button'));
+const TRIAL_MEASURES=[
+ ['effort','How much effort did you exert during this trial?','None at all','A great deal'],
+ ['nasa_mental_demand','How mentally demanding did you find the task?','Very low','Very high'],
+ ['nasa_physical_demand','How physically demanding did you find the task?','Very low','Very high'],
+ ['nasa_temporal_demand','How hurried or rushed did you find the pace of the task?','Very low','Very high'],
+ ['nasa_performance','How successful were you in accomplishing what you were asked to do?','Very low','Very high'],
+ ['nasa_effort','How hard did you have to work to accomplish your level of performance?','Very low','Very high'],
+ ['nasa_frustration','How insecure, discouraged, irritated, stressed, and annoyed were you?','Very low','Very high'],
+ ['fatigue','How tired were you during the task?','Very low','Very high'],
+ ['boredom','How bored were you during the task?','Very low','Very high'],
+ ['enjoyment','How enjoyable did you find the task?','Very low','Very high']
+];
+function rating(display,trialNumber){return new Promise(resolve=>{
+ const answers={};const pages=[
+  {title:'Your effort',items:TRIAL_MEASURES.slice(0,1)},
+  {title:'Task load',items:TRIAL_MEASURES.slice(1,7)},
+  {title:'Your experience',items:TRIAL_MEASURES.slice(7)}
+ ];let page=0;
+ function show(){
+  const current=pages[page];
+  display.innerHTML=wrap(current.title,`Trial ${trialNumber} of 24 · Ratings page ${page+1} of ${pages.length}`);
+  const area=display.querySelector('#content');const form=document.createElement('form');form.className='ratings-form';
+  for(const [key,question,low,high] of current.items){
+   const field=document.createElement('fieldset');field.className='rating-item';
+   const legend=document.createElement('legend');legend.textContent=question;field.append(legend);
+   const scale=document.createElement('div');scale.className='rating-options';
+   for(let i=1;i<=7;i++){
+    const label=document.createElement('label');const input=document.createElement('input');
+    input.type='radio';input.name=key;input.value=String(i);input.required=true;
+    label.append(input,document.createTextNode(String(i)));scale.append(label);
+   }
+   const anchors=document.createElement('div');anchors.className='rating-anchors';
+   const left=document.createElement('span');left.textContent=`1 · ${low}`;
+   const right=document.createElement('span');right.textContent=`7 · ${high}`;
+   anchors.append(left,right);field.append(scale,anchors);form.append(field);
+  }
+  const next=button(page===pages.length-1?'Continue to next trial':'Continue',()=>{},'primary');
+  next.type='submit';form.append(next);
+  form.addEventListener('submit',event=>{
+   event.preventDefault();const data=new FormData(form);
+   for(const [key] of current.items)answers[key]=Number(data.get(key));
+   if(++page<pages.length)show();else resolve(answers);
+  });
+  area.append(form);
+ }
+ show();
  })}
 function addDigits(digits,n){return [...digits].map(d=>(Number(d)+n)%10).join('')}
 function prepareTask(t){
@@ -327,14 +370,14 @@ class RecordingTrial{
    const status=document.createElement('p');status.className='status';area.append(detail,status);
    const trial_key=`${subject_id}_trial_${String(t.trial).padStart(2,'0')}_${t.task}_${t.condition}`;
    const filename=`${trial_key}.${blob.type==='video/mp4'?'mp4':'webm'}`;
-   const upload_status=await sendVideo(blob,filename,status);const effort=await rating(display);
+   const upload_status=await sendVideo(blob,filename,status);const measures=await rating(display,t.trial);
    const guesses=stimulus.kind==='anagram'?result.responses:[];
    const lastPress=stimulus.kind==='press'&&result.press_count===stimulus.target?result.responses.at(-1):null;
    const firstCorrect=guesses.find(g=>g.correct);
    return {
     phase:'task',trial_key,task:t.task,task_name:TASK_NAMES[t.task],condition:t.condition,trial_number:t.trial,
     within_condition:t.within_condition,first_condition:t.first_condition,task_order:t.task_order,
-    video_filename:filename,upload_status,effort,trial_duration_ms:TRIAL_MS,...faceStats,face_pause_ms:clock.pausedMs(),face_restart_count:restartCount,interrupted_active_ms:interruptedActiveMs,
+    video_filename:filename,upload_status,...measures,trial_duration_ms:TRIAL_MS,...faceStats,face_pause_ms:clock.pausedMs(),face_restart_count:restartCount,interrupted_active_ms:interruptedActiveMs,
     add_n:stimulus.kind==='add'?stimulus.n:null,
     add_digits:stimulus.kind==='add'?stimulus.digits:null,
     add_expected:stimulus.kind==='add'?addDigits(stimulus.digits,stimulus.n):null,
